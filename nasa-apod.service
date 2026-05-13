@@ -1,0 +1,15 @@
+[Unit]
+Description=NASA APOD Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/nasa-apod-bot
+ExecStart=/usr/bin/python3 /root/nasa-apod-bot/bot.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
