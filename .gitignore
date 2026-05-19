@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 env/
 .venv/
+kokoro-v1.0.onnx
+voices-v1.0.bin
+/tmp/

@@ -1,7 +1,9 @@
-#!/usr/bin/env python3
+#!/root/nasa-apod-bot/.venv/bin/python3
 import json
 import os
+import subprocess
 import sys
+import tempfile
 import time
 import threading
 from datetime import datetime, timezone
@@ -9,6 +11,48 @@ from datetime import datetime, timezone
 import requests
 
 PROJECT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+KOKORO_MODEL  = os.path.join(PROJECT_DIR, "kokoro-v1.0.onnx")
+KOKORO_VOICES = os.path.join(PROJECT_DIR, "voices-v1.0.bin")
+KOKORO_VOICE  = "af_nova"
+KOKORO_SPEED  = 1.0
+
+_kokoro = None
+_kokoro_lock = threading.Lock()
+
+
+def _get_kokoro():
+    global _kokoro
+    if _kokoro is None:
+        from kokoro_onnx import Kokoro
+        _kokoro = Kokoro(KOKORO_MODEL, KOKORO_VOICES)
+    return _kokoro
+
+
+def generate_audio(text):
+    if not os.path.exists(KOKORO_MODEL) or not os.path.exists(KOKORO_VOICES):
+        return None
+    try:
+        import soundfile as sf
+        with _kokoro_lock:
+            k = _get_kokoro()
+        samples, sample_rate = k.create(text, voice=KOKORO_VOICE, speed=KOKORO_SPEED, lang="en-us")
+
+        wav_path = os.path.join(tempfile.gettempdir(), f"apod_audio_{os.getpid()}.wav")
+        ogg_path = os.path.join(tempfile.gettempdir(), f"apod_audio_{os.getpid()}.ogg")
+
+        sf.write(wav_path, samples, sample_rate)
+
+        subprocess.run([
+            "ffmpeg", "-y", "-i", wav_path,
+            "-c:a", "libopus", "-b:a", "32k", ogg_path,
+        ], capture_output=True, timeout=60)
+
+        os.remove(wav_path)
+        return ogg_path
+    except Exception as e:
+        log(f"TTS error: {e}")
+        return None
 
 _ENV_FILE = os.path.join(PROJECT_DIR, ".env")
 if os.path.exists(_ENV_FILE):
@@ -123,6 +167,25 @@ def send_text(chat_id, text):
         log(f"sendText error → {chat_id}: {e}")
 
 
+def send_voice(chat_id, ogg_path):
+    try:
+        with open(ogg_path, "rb") as voice:
+            resp = requests.post(f"{TELEGRAM_API}/sendVoice", data={
+                "chat_id": chat_id,
+            }, files={"voice": ("apod.ogg", voice, "audio/ogg")}, timeout=30)
+        if not resp.ok:
+            log(f"sendVoice FAIL → {chat_id}: {resp.status_code} {resp.text[:200]}")
+        else:
+            log(f"sendVoice OK → {chat_id}")
+    except Exception as e:
+        log(f"sendVoice EXC → {chat_id}: {e}")
+    finally:
+        try:
+            os.remove(ogg_path)
+        except OSError:
+            pass
+
+
 def send_apod_media(chat_id, apod, caption_prefix=""):
     media_url = apod.get("url", "")
     media_type = apod.get("media_type", "image")
@@ -151,6 +214,14 @@ def send_apod_media(chat_id, apod, caption_prefix=""):
 
     if truncated:
         send_text(chat_id, full_explanation)
+
+    threading.Thread(target=_send_apod_voice, args=(chat_id, full_explanation), daemon=True).start()
+
+
+def _send_apod_voice(chat_id, text):
+    ogg_path = generate_audio(text)
+    if ogg_path:
+        send_voice(chat_id, ogg_path)
 
 
 # ── Chat storage ─────────────────────────────────────────────────────────────
