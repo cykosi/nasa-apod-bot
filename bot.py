@@ -194,7 +194,7 @@ def send_apod_media(chat_id, apod, caption_prefix=""):
     if caption_prefix:
         caption = caption_prefix + caption
 
-    markup = json.dumps({"inline_keyboard": [[{"text": "💬Quote", "callback_data": "quote"}]]})
+    markup = json.dumps({"keyboard": [["💬Quote"]], "resize_keyboard": True})
 
     try:
         if media_type == "image":
@@ -396,6 +396,19 @@ def handle_message(chat_id, text):
             send_text(chat_id, "Unable to fetch today's APOD. Please try again later.")
         return
 
+    if text.startswith("💬Quote") or text.lower().startswith("quote"):
+        apod = get_apod()
+        if apod:
+            quote = generate_apod_quote(apod)
+            if quote:
+                send_text(chat_id, quote)
+                log(f"Quote sent → {chat_id}")
+            else:
+                send_text(chat_id, "Could not generate a quote for this APOD.")
+        else:
+            send_text(chat_id, "No APOD available. Try /apod first.")
+        return
+
     if text.startswith("/about"):
         send_text(chat_id,
             "I'm an APOD Bot powered by NASA API and DeepSeek LLM. "
@@ -409,39 +422,10 @@ def handle_message(chat_id, text):
         send_text(chat_id, OFF_TOPIC_REPLY)
 
 
-# ── Callback handler ─────────────────────────────────────────────────────────
-
-def handle_callback(callback_id, chat_id, data):
-    try:
-        if data == "quote":
-            apod = get_apod()
-            if apod:
-                requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
-                    "callback_query_id": callback_id,
-                }, timeout=10)
-                quote = generate_apod_quote(apod)
-                if quote:
-                    send_text(chat_id, quote)
-                    log(f"Quote sent → {chat_id}")
-                else:
-                    send_text(chat_id, "Could not generate a quote for this APOD.")
-            else:
-                requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
-                    "callback_query_id": callback_id,
-                    "text": "No APOD available.",
-                }, timeout=10)
-        else:
-            requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
-                "callback_query_id": callback_id,
-            }, timeout=10)
-    except Exception as e:
-        log(f"Callback error: {e}")
-
-
 # ── Updates polling ──────────────────────────────────────────────────────────
 
 def poll_updates(offset=None):
-    params = {"timeout": 30, "allowed_updates": ["message", "callback_query"]}
+    params = {"timeout": 30, "allowed_updates": ["message"]}
     if offset:
         params["offset"] = offset
     try:
@@ -471,18 +455,6 @@ def main():
             updates = poll_updates(offset)
             for upd in updates:
                 offset = upd["update_id"] + 1
-
-                cb = upd.get("callback_query")
-                if cb:
-                    cb_id = cb["id"]
-                    cb_data = cb.get("data", "")
-                    cb_chat = cb.get("message", {}).get("chat", {})
-                    cb_chat_id = cb_chat.get("id", "")
-                    if cb_chat_id:
-                        log(f"← callback {cb_chat_id}: {cb_data}")
-                        handle_callback(cb_id, cb_chat_id, cb_data)
-                    continue
-
                 msg = upd.get("message")
                 if not msg or "text" not in msg:
                     continue
