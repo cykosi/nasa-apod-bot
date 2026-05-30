@@ -194,16 +194,19 @@ def send_apod_media(chat_id, apod, caption_prefix=""):
     if caption_prefix:
         caption = caption_prefix + caption
 
+    markup = json.dumps({"inline_keyboard": [[{"text": "💬Quote", "callback_data": "quote"}]]})
+
     try:
         if media_type == "image":
             resp = requests.post(f"{TELEGRAM_API}/sendPhoto", json={
                 "chat_id": chat_id, "photo": media_url, "caption": caption,
-                "parse_mode": "HTML"
+                "parse_mode": "HTML", "reply_markup": markup,
             }, timeout=30)
         else:
             text = f"{caption}\n\n<a href=\"{media_url}\">{media_url}</a>"
             resp = requests.post(f"{TELEGRAM_API}/sendMessage", json={
-                "chat_id": chat_id, "text": text, "parse_mode": "HTML"
+                "chat_id": chat_id, "text": text, "parse_mode": "HTML",
+                "reply_markup": markup,
             }, timeout=30)
         if not resp.ok:
             log(f"sendMedia FAIL → {chat_id}: {resp.status_code} {resp.text[:200]}")
@@ -300,6 +303,7 @@ def ask_deepseek(question):
         ],
         "max_tokens": 200,
         "temperature": 0.3,
+        "thinking": {"type": "disabled"},
     }
     headers = {
         "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
@@ -309,10 +313,58 @@ def ask_deepseek(question):
         resp = requests.post(DEEPSEEK_API, json=payload, headers=headers, timeout=30)
         resp.raise_for_status()
         data = resp.json()
-        return data["choices"][0]["message"]["content"].strip()
+        choice = data["choices"][0]["message"]
+        result = choice.get("content", "").strip()
+        if not result:
+            result = choice.get("reasoning_content", "").strip()
+        return result or "Sorry, I'm having trouble processing your question right now."
     except Exception as e:
         log(f"DeepSeek error: {e}")
         return "Sorry, I'm having trouble processing your question right now."
+
+
+def generate_apod_quote(apod):
+    title = apod.get("title", "")
+    explanation = apod.get("explanation", "")
+
+    system_prompt = (
+        "You are a curator of famous quotations. Given an astronomy topic, provide "
+        "a relevant, real quotation from a well-known, verified individual (scientist, "
+        "philosopher, poet, historical figure, etc.) that relates to the APOD topic. "
+        "The quote must be genuine and attributable — do not fabricate. "
+        "Respond in exactly this format with no other text:\n"
+        '"The quotation text."\n— Author Name, Description (e.g. astronomer, philosopher)'
+    )
+
+    payload = {
+        "model": "deepseek-v4-flash",
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": (
+                f"Give me a famous quotation that relates to this APOD:\n"
+                f"Title: {title}\nDescription: {explanation}"
+            )},
+        ],
+        "max_tokens": 200,
+        "temperature": 0.5,
+        "thinking": {"type": "disabled"},
+    }
+    headers = {
+        "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    try:
+        resp = requests.post(DEEPSEEK_API, json=payload, headers=headers, timeout=30)
+        resp.raise_for_status()
+        data = resp.json()
+        choice = data["choices"][0]["message"]
+        result = choice.get("content", "").strip()
+        if not result:
+            result = choice.get("reasoning_content", "").strip()
+        return result or None
+    except Exception as e:
+        log(f"Quote generation error: {e}")
+        return None
 
 
 # ── Message handler ──────────────────────────────────────────────────────────
@@ -357,10 +409,39 @@ def handle_message(chat_id, text):
         send_text(chat_id, OFF_TOPIC_REPLY)
 
 
+# ── Callback handler ─────────────────────────────────────────────────────────
+
+def handle_callback(callback_id, chat_id, data):
+    try:
+        if data == "quote":
+            apod = get_apod()
+            if apod:
+                requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
+                    "callback_query_id": callback_id,
+                }, timeout=10)
+                quote = generate_apod_quote(apod)
+                if quote:
+                    send_text(chat_id, quote)
+                    log(f"Quote sent → {chat_id}")
+                else:
+                    send_text(chat_id, "Could not generate a quote for this APOD.")
+            else:
+                requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
+                    "callback_query_id": callback_id,
+                    "text": "No APOD available.",
+                }, timeout=10)
+        else:
+            requests.post(f"{TELEGRAM_API}/answerCallbackQuery", json={
+                "callback_query_id": callback_id,
+            }, timeout=10)
+    except Exception as e:
+        log(f"Callback error: {e}")
+
+
 # ── Updates polling ──────────────────────────────────────────────────────────
 
 def poll_updates(offset=None):
-    params = {"timeout": 30, "allowed_updates": ["message"]}
+    params = {"timeout": 30, "allowed_updates": ["message", "callback_query"]}
     if offset:
         params["offset"] = offset
     try:
@@ -390,6 +471,18 @@ def main():
             updates = poll_updates(offset)
             for upd in updates:
                 offset = upd["update_id"] + 1
+
+                cb = upd.get("callback_query")
+                if cb:
+                    cb_id = cb["id"]
+                    cb_data = cb.get("data", "")
+                    cb_chat = cb.get("message", {}).get("chat", {})
+                    cb_chat_id = cb_chat.get("id", "")
+                    if cb_chat_id:
+                        log(f"← callback {cb_chat_id}: {cb_data}")
+                        handle_callback(cb_id, cb_chat_id, cb_data)
+                    continue
+
                 msg = upd.get("message")
                 if not msg or "text" not in msg:
                     continue
